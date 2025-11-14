@@ -16,6 +16,9 @@ from astrbot.api.message_components import Image, Plain
 # 字体配置
 DEFAULT_FONT_PATH = Path(__file__).parent / "font" / "consola.ttf"
 FONT_SIZE = 14
+# 字体宽高比补偿系数 (字符宽度/字符高度)
+# 大多数等宽字体的宽度约为高度的 0.5-0.6 倍
+FONT_ASPECT_RATIO = 0.55
 
 # 字符映射
 STR_MAP = "@@$$&B88QMMGW##EE93SPPDOOU**==()+^,\"--''.  "
@@ -177,12 +180,18 @@ class CharPicPlugin(Star):
             w, h = img.size
             
             # 计算新的尺寸，保持宽高比
+            # 由于等宽字体的字符不是正方形(宽度约为高度的0.5-0.6倍)
+            # 需要对高度进行补偿，以保持最终渲染图片的宽高比与原图一致
             if w > new_w:
+                # 计算按比例缩放后的高度
                 new_h = int(new_w * h / w)
+                # 应用字体宽高比补偿，减少行数以抵消字符高度大于宽度的影响
+                new_h = int(new_h * FONT_ASPECT_RATIO)
                 img = img.resize((new_w, new_h))
             else:
-                # 如果图片不宽，就按高度压缩一半
-                new_h = int(h / 2)
+                # 如果图片宽度小于目标宽度，保持宽度不变
+                # 同样需要应用字体宽高比补偿
+                new_h = int(h * FONT_ASPECT_RATIO)
                 img = img.resize((w, new_h))
             
             s = ""
