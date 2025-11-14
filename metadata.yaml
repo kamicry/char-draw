@@ -3,4 +3,3 @@ desc: 将图片转换为ASCII艺术字符画的插件，支持静态图片和GIF
 version: v1.0.0 
 author:  kamicry
 repo: https://github.com/kamicry/char-draw
-
