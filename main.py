@@ -53,7 +53,7 @@ class CharPicPlugin(Star):
                 logger.error(f"字体文件加载失败: {e}")
 
     @filter.command("字符画", "charpic")
-    async def charpic_handler(self, event: AstrMessageEvent, command_text: str = ""):
+    async def charpic_handler(self, event: AstrMessageEvent):
         """字符画生成指令处理器"""
         try:
             logger.info(f"收到字符画生成请求，来自用户: {event.get_sender_name()}")
