@@ -2,6 +2,8 @@ import io
 import ssl
 import imageio
 import httpx
+import tempfile
+import os
 from typing import List, Optional
 from pathlib import Path
 
@@ -77,13 +79,33 @@ class CharPicPlugin(Star):
             if img.format == "GIF":
                 logger.info("开始处理GIF图片")
                 result_bytes = await self._process_gif(img)
+                file_ext = "gif"
             else:
                 logger.info("开始处理静态图片")
                 result_bytes = await self._process_static_image(img)
+                file_ext = "jpg"
 
             if result_bytes:
                 logger.info(f"字符画生成成功，大小: {len(result_bytes)} bytes")
-                yield event.image_result(result_bytes)
+                
+                # 保存到临时文件
+                try:
+                    with tempfile.NamedTemporaryFile(mode='wb', suffix=f'.{file_ext}', delete=False) as temp_file:
+                        temp_file.write(result_bytes)
+                        temp_path = temp_file.name
+                    
+                    logger.info(f"字符画已保存到临时文件: {temp_path}")
+                    yield event.image_result(temp_path)
+                    
+                    # 发送后删除临时文件
+                    try:
+                        os.unlink(temp_path)
+                        logger.info(f"已删除临时文件: {temp_path}")
+                    except Exception as e:
+                        logger.warning(f"删除临时文件失败: {e}")
+                except Exception as e:
+                    logger.error(f"保存临时文件失败: {e}")
+                    yield event.plain_result("字符画生成失败")
             else:
                 logger.error("字符画生成失败")
                 yield event.plain_result("字符画生成失败")
