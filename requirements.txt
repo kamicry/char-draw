@@ -1,0 +1,8 @@
+# AstrBot 字符画生成器插件依赖项
+# 
+# 安装命令：
+# pip install Pillow>=9.0.0 httpx>=0.27.0 "imageio>=2.9.0,<3.0" --break-system-packages
+
+Pillow>=9.0.0
+httpx>=0.27.0
+imageio>=2.9.0,<3.0
