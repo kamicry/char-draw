@@ -5,7 +5,7 @@ import httpx
 from typing import List, Optional
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image as PILImage, ImageDraw, ImageFont
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -130,7 +130,7 @@ class CharPicPlugin(Star):
             logger.error(f"获取图片URL失败: {e}")
             return None
 
-    async def _download_image(self, image_url: str) -> Optional[Image.Image]:
+    async def _download_image(self, image_url: str) -> Optional[PILImage.Image]:
         """下载图片"""
         try:
             if not image_url:
@@ -141,13 +141,13 @@ class CharPicPlugin(Star):
                 logger.warning(f"图片 {image_url} 下载失败: {response.status_code}")
                 return None
             
-            img = Image.open(io.BytesIO(response.content))
+            img = PILImage.open(io.BytesIO(response.content))
             return img
         except Exception as e:
             logger.error(f"下载图片时出错: {e}")
             return None
 
-    async def _get_pic_text(self, img: Image.Image, new_w: int = 150) -> str:
+    async def _get_pic_text(self, img: PILImage.Image, new_w: int = 150) -> str:
         """将图片转换为字符文本"""
         try:
             n = len(STR_MAP)
@@ -181,7 +181,7 @@ class CharPicPlugin(Star):
             font = ImageFont.truetype(font_path, font_size)
             
             # 创建一个临时图片用于计算文本尺寸
-            temp_img = Image.new("L", (1, 1))
+            temp_img = PILImage.new("L", (1, 1))
             draw = ImageDraw.Draw(temp_img)
             
             try:
@@ -204,11 +204,11 @@ class CharPicPlugin(Star):
             height = len(lines) * 10
             return font, max_width, height
 
-    async def _text_to_image(self, text: str) -> Image.Image:
+    async def _text_to_image(self, text: str) -> PILImage.Image:
         """将文本转换为图片"""
         try:
             if not text:
-                return Image.new("L", (1, 1), "#FFFFFF")
+                return PILImage.new("L", (1, 1), "#FFFFFF")
             
             font_path = str(DEFAULT_FONT_PATH)
             if not Path(font_path).exists():
@@ -218,22 +218,22 @@ class CharPicPlugin(Star):
                 lines = text.split('\n')
                 max_width = max(len(line) for line in lines) * 10
                 height = len(lines) * 12
-                img = Image.new("L", (max_width, height), "#FFFFFF")
+                img = PILImage.new("L", (max_width, height), "#FFFFFF")
                 draw = ImageDraw.Draw(img)
                 draw.text((0, 0), text, fill="#000000", font=font)
                 return img
             
             font, w, h = await self._get_text_dimensions(font_path, FONT_SIZE, text)
-            img = Image.new("L", (w, h), "#FFFFFF")
+            img = PILImage.new("L", (w, h), "#FFFFFF")
             draw = ImageDraw.Draw(img)
             draw.text((0, 0), text, fill="#000000", font=font)
             return img
         except Exception as e:
             logger.error(f"将文本转换为图片时出错: {e}")
             # 返回一个简单的错误图片
-            return Image.new("L", (100, 50), "#FFFFFF")
+            return PILImage.new("L", (100, 50), "#FFFFFF")
 
-    async def _process_static_image(self, img: Image.Image) -> Optional[bytes]:
+    async def _process_static_image(self, img: PILImage.Image) -> Optional[bytes]:
         """处理静态图片"""
         try:
             logger.info(f"开始处理静态图片，原始尺寸: {img.size}")
@@ -262,10 +262,10 @@ class CharPicPlugin(Star):
             logger.error(f"处理静态图片时出错: {e}")
             return None
 
-    async def _process_gif(self, gif: Image.Image) -> Optional[bytes]:
+    async def _process_gif(self, gif: PILImage.Image) -> Optional[bytes]:
         """处理GIF图片"""
         try:
-            frame_list: List[Image.Image] = []
+            frame_list: List[PILImage.Image] = []
             frame_count = 0
             
             # 逐帧处理GIF
