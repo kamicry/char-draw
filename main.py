@@ -172,35 +172,35 @@ class CharPicPlugin(Star):
             logger.error(f"下载图片时出错: {e}")
             return None
 
-    async def _get_pic_text(self, img: PILImage.Image, new_w: int = 150) -> str:
+    async def _get_pic_text(self, img: PILImage.Image, new_w: int = 150, enforce_target_width: bool = False) -> str:
         """将图片转换为字符文本"""
         try:
             n = len(STR_MAP)
             img = img.convert("L")
             w, h = img.size
-            
-            # 计算新的尺寸，保持宽高比
-            # 由于等宽字体的字符不是正方形(宽度约为高度的0.5-0.6倍)
-            # 需要对高度进行补偿，以保持最终渲染图片的宽高比与原图一致
-            if w > new_w:
-                # 计算按比例缩放后的高度
-                new_h = int(new_w * h / w)
-                # 应用字体宽高比补偿，减少行数以抵消字符高度大于宽度的影响
-                new_h = int(new_h * FONT_ASPECT_RATIO)
-                img = img.resize((new_w, new_h))
-            else:
-                # 如果图片宽度小于目标宽度，保持宽度不变
-                # 同样需要应用字体宽高比补偿
-                new_h = int(h * FONT_ASPECT_RATIO)
-                img = img.resize((w, new_h))
-            
+
+            if w == 0 or h == 0:
+                logger.warning("输入图片尺寸非法，无法转换为字符文本")
+                return ""
+
+            target_w = w
+            if new_w:
+                if enforce_target_width or w > new_w:
+                    target_w = max(1, new_w)
+
+            scale = target_w / w if w else 1
+            target_h = max(1, int(h * scale * FONT_ASPECT_RATIO))
+
+            if img.size != (target_w, target_h):
+                img = img.resize((target_w, target_h))
+
             s = ""
             for x in range(img.height):
                 for y in range(img.width):
                     gray_v = img.getpixel((y, x))
                     s += STR_MAP[int(n * (gray_v / 256))]
                 s += "\n"
-            
+
             return s
         except Exception as e:
             logger.error(f"转换图片为字符文本时出错: {e}")
@@ -296,38 +296,97 @@ class CharPicPlugin(Star):
     async def _process_gif(self, gif: PILImage.Image) -> Optional[bytes]:
         """处理GIF图片"""
         try:
-            frame_list: List[PILImage.Image] = []
-            frame_count = 0
-            
-            # 逐帧处理GIF
+            processed_frames: List[PILImage.Image] = []
+            frame_durations: List[float] = []
+            max_width = 0
+            max_height = 0
+            frame_index = 0
+
             try:
-                while True:
-                    current_frame = gif.tell()
-                    frame = gif.copy()
-                    
-                    # 将当前帧转换为字符画
-                    text = await self._get_pic_text(frame, new_w=80)
-                    frame_img = await self._text_to_image(text)
-                    frame_list.append(frame_img)
-                    frame_count += 1
-                    
-                    # 移动到下一帧
-                    gif.seek(current_frame + 1)
+                gif.seek(0)
             except EOFError:
-                # GIF处理完毕
-                pass
-            
+                logger.error("GIF 不包含有效帧")
+                return None
+
+            while True:
+                try:
+                    gif.seek(frame_index)
+                except EOFError:
+                    break
+
+                raw_frame = gif.copy()
+                frame_info = getattr(raw_frame, "info", {}) if hasattr(raw_frame, "info") else {}
+                frame = raw_frame.convert("RGBA")
+                original_size = frame.size
+
+                text = await self._get_pic_text(frame, new_w=80, enforce_target_width=True)
+                if not text:
+                    logger.warning(f"第 {frame_index} 帧字符画内容为空")
+
+                frame_img = await self._text_to_image(text)
+                if frame_img.mode != "L":
+                    frame_img = frame_img.convert("L")
+
+                processed_frames.append(frame_img)
+                max_width = max(max_width, frame_img.width)
+                max_height = max(max_height, frame_img.height)
+
+                duration_ms = frame_info.get("duration", gif.info.get("duration", 80))
+                if not duration_ms or duration_ms <= 0:
+                    duration_ms = 80
+                frame_durations.append(duration_ms / 1000.0)
+
+                logger.info(
+                    f"第 {frame_index} 帧：原始尺寸 {original_size[0]}x{original_size[1]}，字符画尺寸 {frame_img.width}x{frame_img.height}"
+                )
+
+                frame_index += 1
+
+            frame_count = len(processed_frames)
             logger.info(f"GIF处理完成，共处理 {frame_count} 帧")
-            
-            if not frame_list:
+
+            if frame_count == 0:
                 logger.error("没有成功处理的GIF帧")
                 return None
-            
-            # 保存为GIF
+
+            target_size = (max_width, max_height)
+            if target_size[0] == 0 or target_size[1] == 0:
+                logger.error(f"字符画帧尺寸异常: {target_size}")
+                return None
+
+            uniform_frames: List[PILImage.Image] = []
+
+            for idx, frame_img in enumerate(processed_frames):
+                if frame_img.size != target_size:
+                    padded_frame = PILImage.new("L", target_size, 255)
+                    padded_frame.paste(frame_img, (0, 0))
+                    uniform_frames.append(padded_frame)
+                    logger.debug(
+                        f"第 {idx} 帧已填充至统一尺寸 {target_size[0]}x{target_size[1]}"
+                    )
+                else:
+                    uniform_frames.append(frame_img)
+
+            unique_sizes = {frame.size for frame in uniform_frames}
+            if len(unique_sizes) != 1:
+                logger.error(f"字符画帧尺寸仍不一致: {unique_sizes}")
+                return None
+
+            uniform_frames = [frame if frame.mode == "L" else frame.convert("L") for frame in uniform_frames]
+
+            if not frame_durations:
+                duration_arg = 0.08
+            elif len(frame_durations) == 1:
+                duration_arg = frame_durations[0]
+            else:
+                duration_arg = frame_durations
+
             output = io.BytesIO()
-            imageio.mimsave(output, frame_list, format="gif", duration=0.08)
+            imageio.mimsave(output, uniform_frames, format="gif", duration=duration_arg)
             result_bytes = output.getvalue()
-            logger.info(f"GIF字符画生成成功，大小: {len(result_bytes)} bytes")
+            logger.info(
+                f"GIF字符画生成成功，大小: {len(result_bytes)} bytes，帧尺寸 {target_size[0]}x{target_size[1]}"
+            )
             return result_bytes
         except Exception as e:
             logger.error(f"处理GIF时出错: {e}")
