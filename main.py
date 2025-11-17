@@ -4,10 +4,10 @@ import imageio
 import httpx
 import tempfile
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 
-from PIL import Image as PILImage, ImageDraw, ImageFont
+from PIL import Image as PILImage, ImageDraw, ImageFont, ImageSequence
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -23,6 +23,17 @@ FONT_ASPECT_RATIO = 0.55
 # 字符映射
 STR_MAP = "@@$$&B88QMMGW##EE93SPPDOOU**==()+^,\"--''.  "
 
+# 支持的动图格式
+ANIMATED_FORMATS = {'GIF', 'PNG', 'APNG', 'WEBP', 'MNG'}
+
+# 文件魔术字节（用于格式检测）
+MAGIC_BYTES = {
+    'GIF': b'GIF8',
+    'PNG': b'\x89PNG\r\n\x1a\n',
+    'WEBP': b'RIFF',
+    'MNG': b'\x8aMNG\r\n\x1a\n'
+}
+
 # SSL配置
 SSL_CONTEXT = ssl.create_default_context()
 SSL_CONTEXT.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_3
@@ -32,7 +43,7 @@ SSL_CONTEXT.set_ciphers("HIGH:!aNULL:!MD5")
 HTTP_CLIENT = httpx.AsyncClient(verify=SSL_CONTEXT)
 
 
-@register("charpic", "移植自1umine的nonebot_plugin_charpic", "将图片转换为ASCII艺术字符画的插件，支持静态图片和GIF", "1.0.0")
+@register("charpic", "移植自1umine的nonebot_plugin_charpic", "将图片转换为ASCII艺术字符画的插件，支持静态图片和动图（GIF/APNG/WebP/MNG）", "1.0.0")
 class CharPicPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -78,15 +89,18 @@ class CharPicPlugin(Star):
 
             logger.info(f"成功下载图片，尺寸: {img.size}, 格式: {img.format}")
 
-            # 处理图片
-            if img.format == "GIF":
-                logger.info("开始处理GIF图片")
-                result_bytes = await self._process_gif(img)
+            # 检测是否为动图
+            is_animated = self._is_animated(img)
+            
+            if is_animated:
+                frame_count = self._get_frame_count(img)
+                logger.info(f"检测到动图，格式: {img.format}, 帧数: {frame_count}")
+                result_bytes = await self._process_animated_image(img)
                 file_ext = "gif"
             else:
-                logger.info("开始处理静态图片")
+                logger.info(f"开始处理静态图片，格式: {img.format}")
                 result_bytes = await self._process_static_image(img)
-                file_ext = "jpg"
+                file_ext = "png"
 
             if result_bytes:
                 logger.info(f"字符画生成成功，大小: {len(result_bytes)} bytes")
@@ -171,6 +185,79 @@ class CharPicPlugin(Star):
         except Exception as e:
             logger.error(f"下载图片时出错: {e}")
             return None
+
+    def _detect_format_from_bytes(self, img_bytes: bytes) -> Optional[str]:
+        """根据文件头（魔术字节）检测图片格式"""
+        try:
+            if img_bytes.startswith(MAGIC_BYTES['GIF']):
+                return 'GIF'
+            elif img_bytes.startswith(MAGIC_BYTES['PNG']):
+                return 'PNG'
+            elif img_bytes.startswith(MAGIC_BYTES['MNG']):
+                return 'MNG'
+            elif img_bytes.startswith(MAGIC_BYTES['WEBP']):
+                if b'WEBP' in img_bytes[:20]:
+                    return 'WEBP'
+            return None
+        except Exception as e:
+            logger.error(f"检测图片格式时出错: {e}")
+            return None
+
+    def _is_animated(self, img: PILImage.Image) -> bool:
+        """检测图片是否为动图"""
+        try:
+            if img.format == 'GIF':
+                try:
+                    img.seek(1)
+                    img.seek(0)
+                    return True
+                except EOFError:
+                    return False
+            
+            if img.format in ('PNG', 'APNG'):
+                if hasattr(img, 'n_frames') and img.n_frames > 1:
+                    return True
+                try:
+                    img.seek(1)
+                    img.seek(0)
+                    return True
+                except (EOFError, AttributeError):
+                    return False
+            
+            if img.format == 'WEBP':
+                if hasattr(img, 'n_frames') and img.n_frames > 1:
+                    return True
+                try:
+                    img.seek(1)
+                    img.seek(0)
+                    return True
+                except EOFError:
+                    return False
+            
+            return False
+        except Exception as e:
+            logger.warning(f"检测动图时出错: {e}")
+            return False
+
+    def _get_frame_count(self, img: PILImage.Image) -> int:
+        """获取图片的帧数"""
+        try:
+            if hasattr(img, 'n_frames'):
+                return img.n_frames
+            
+            frame_count = 0
+            try:
+                while True:
+                    img.seek(frame_count)
+                    frame_count += 1
+            except EOFError:
+                pass
+            
+            img.seek(0)
+            return frame_count
+        except Exception as e:
+            logger.error(f"获取帧数时出错: {e}")
+            return 0
 
     async def _get_pic_text(self, img: PILImage.Image, new_w: int = 150, enforce_target_width: bool = False) -> str:
         """将图片转换为字符文本"""
@@ -284,7 +371,7 @@ class CharPicPlugin(Star):
             logger.info(f"字符文本转换为图片成功，结果尺寸: {result_img.size}")
             
             output = io.BytesIO()
-            result_img.save(output, format="jpeg")
+            result_img.save(output, format="PNG")
             result_bytes = output.getvalue()
             
             logger.info(f"静态图片字符画生成成功，大小: {len(result_bytes)} bytes")
@@ -293,9 +380,12 @@ class CharPicPlugin(Star):
             logger.error(f"处理静态图片时出错: {e}")
             return None
 
-    async def _process_gif(self, gif: PILImage.Image) -> Optional[bytes]:
-        """处理GIF图片"""
+    async def _process_animated_image(self, img: PILImage.Image) -> Optional[bytes]:
+        """处理动图（GIF/APNG/WebP/MNG）"""
         try:
+            img_format = img.format or 'UNKNOWN'
+            logger.info(f"开始处理动图，格式: {img_format}")
+            
             processed_frames: List[PILImage.Image] = []
             frame_durations: List[float] = []
             max_width = 0
@@ -303,18 +393,18 @@ class CharPicPlugin(Star):
             frame_index = 0
 
             try:
-                gif.seek(0)
+                img.seek(0)
             except EOFError:
-                logger.error("GIF 不包含有效帧")
+                logger.error(f"{img_format} 不包含有效帧")
                 return None
 
             while True:
                 try:
-                    gif.seek(frame_index)
+                    img.seek(frame_index)
                 except EOFError:
                     break
 
-                raw_frame = gif.copy()
+                raw_frame = img.copy()
                 frame_info = getattr(raw_frame, "info", {}) if hasattr(raw_frame, "info") else {}
                 frame = raw_frame.convert("RGBA")
                 original_size = frame.size
@@ -331,22 +421,22 @@ class CharPicPlugin(Star):
                 max_width = max(max_width, frame_img.width)
                 max_height = max(max_height, frame_img.height)
 
-                duration_ms = frame_info.get("duration", gif.info.get("duration", 80))
+                duration_ms = frame_info.get("duration", img.info.get("duration", 80))
                 if not duration_ms or duration_ms <= 0:
                     duration_ms = 80
                 frame_durations.append(duration_ms / 1000.0)
 
                 logger.info(
-                    f"第 {frame_index} 帧：原始尺寸 {original_size[0]}x{original_size[1]}，字符画尺寸 {frame_img.width}x{frame_img.height}"
+                    f"第 {frame_index} 帧：原始尺寸 {original_size[0]}x{original_size[1]}，字符画尺寸 {frame_img.width}x{frame_img.height}，延迟 {duration_ms}ms"
                 )
 
                 frame_index += 1
 
             frame_count = len(processed_frames)
-            logger.info(f"GIF处理完成，共处理 {frame_count} 帧")
+            logger.info(f"{img_format}处理完成，共处理 {frame_count} 帧")
 
             if frame_count == 0:
-                logger.error("没有成功处理的GIF帧")
+                logger.error(f"没有成功处理的{img_format}帧")
                 return None
 
             target_size = (max_width, max_height)
@@ -385,11 +475,11 @@ class CharPicPlugin(Star):
             imageio.mimsave(output, uniform_frames, format="gif", duration=duration_arg)
             result_bytes = output.getvalue()
             logger.info(
-                f"GIF字符画生成成功，大小: {len(result_bytes)} bytes，帧尺寸 {target_size[0]}x{target_size[1]}"
+                f"{img_format}字符画生成成功，输出格式: GIF，大小: {len(result_bytes)} bytes，帧尺寸 {target_size[0]}x{target_size[1]}"
             )
             return result_bytes
         except Exception as e:
-            logger.error(f"处理GIF时出错: {e}")
+            logger.error(f"处理动图时出错: {e}")
             return None
 
     async def terminate(self):
