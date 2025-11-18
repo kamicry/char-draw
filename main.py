@@ -12,6 +12,10 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Image, Plain
+try:
+    from astrbot.api.message_components import Reply
+except ImportError:
+    Reply = None
 
 # 字体配置
 DEFAULT_FONT_PATH = Path(__file__).parent / "font" / "consola.ttf"
@@ -132,54 +136,127 @@ class CharPicPlugin(Star):
             yield event.plain_result(f"生成字符画时出错: {str(e)}")
 
     async def _get_image_from_message(self, event: AstrMessageEvent) -> Optional[str]:
-        """从消息中获取图片URL"""
+        """从消息中获取图片URL
+        
+        支持两种方式获取图片：
+        1. 从当前消息中直接获取图片
+        2. 从引用/回复的消息中获取图片
+        """
         try:
-            message_chain = event.get_messages()
+            images = []
             
-            # 遍历消息链查找图片
+            # 获取当前消息的消息链
+            message_chain = None
+            if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'message'):
+                message_chain = event.message_obj.message
+            elif hasattr(event, 'get_messages'):
+                message_chain = event.get_messages()
+            
+            if not message_chain:
+                logger.warning("无法获取消息链")
+                return None
+            
+            # 遍历消息链中的所有组件
             for component in message_chain:
+                # 方式一：从当前消息获取图片
                 if isinstance(component, Image):
-                    # 如果是图片组件，获取其URL
-                    if hasattr(component, 'url') and component.url:
-                        return component.url
-                    elif hasattr(component, 'image_url') and component.image_url:
-                        return component.image_url
-                    elif hasattr(component, 'file') and component.file:
-                        return component.file
-                    elif hasattr(component, 'image_file') and component.image_file:
-                        return component.image_file
+                    images.append(component)
+                    logger.info("在当前消息中找到图片")
+                
+                # 方式二：从引用消息获取图片
+                elif Reply is not None and isinstance(component, Reply):
+                    logger.info("检测到引用消息，尝试获取引用消息中的图片")
+                    replied_chain = getattr(component, 'chain', None)
+                    if replied_chain:
+                        for reply_comp in replied_chain:
+                            if isinstance(reply_comp, Image):
+                                images.append(reply_comp)
+                                logger.info("在引用消息中找到图片")
             
-            # 如果当前消息没有图片，检查是否是回复消息
-            # 尝试获取回复消息的图片
-            if hasattr(event, 'reply') and event.reply:
-                reply_chain = event.reply.get_messages() if hasattr(event.reply, 'get_messages') else []
-                for component in reply_chain:
-                    if isinstance(component, Image):
-                        if hasattr(component, 'url') and component.url:
-                            return component.url
-                        elif hasattr(component, 'image_url') and component.image_url:
-                            return component.image_url
-                        elif hasattr(component, 'file') and component.file:
-                            return component.file
-                        elif hasattr(component, 'image_file') and component.image_file:
-                            return component.image_file
+            # 兼容旧版本，尝试从 event.reply 中获取图片
+            if not images and hasattr(event, 'reply') and event.reply:
+                logger.info("未在当前消息中找到图片，尝试从回复消息中获取图片")
+                reply_chain = None
+                if hasattr(event.reply, 'get_messages'):
+                    reply_chain = event.reply.get_messages()
+                elif hasattr(event.reply, 'message'):
+                    reply_chain = getattr(event.reply, 'message')
+                if reply_chain:
+                    for reply_component in reply_chain:
+                        if isinstance(reply_component, Image):
+                            images.append(reply_component)
+                        elif Reply is not None and isinstance(reply_component, Reply):
+                            nested_chain = getattr(reply_component, 'chain', None)
+                            if nested_chain:
+                                for nested_comp in nested_chain:
+                                    if isinstance(nested_comp, Image):
+                                        images.append(nested_comp)
+                    if images:
+                        logger.info("在回复消息中找到图片")
             
+            # 当找到多张图片时，使用第一张
+            if len(images) > 1:
+                logger.info(f"找到 {len(images)} 张图片，使用第一张")
+            
+            if images:
+                image_component = images[0]
+                # 获取图片 URL/路径
+                # 尝试多个可能的属性名
+                for attr_name in ['file', 'url', 'image_url', 'image_file', 'path']:
+                    if hasattr(image_component, attr_name):
+                        image_path = getattr(image_component, attr_name)
+                        if image_path:
+                            logger.info(f"成功获取图片路径: {image_path}")
+                            return image_path
+                
+                logger.warning("图片组件存在但无法获取图片路径")
+                return None
+            
+            logger.info("未在消息或引用消息中找到图片")
             return None
+            
         except Exception as e:
-            logger.error(f"获取图片URL失败: {e}")
+            logger.error(f"获取图片URL失败: {e}", exc_info=True)
             return None
 
     async def _download_image(self, image_url: str) -> Optional[PILImage.Image]:
-        """下载图片"""
+        """下载图片，支持本地文件路径和网络URL"""
         try:
             if not image_url:
                 return None
-                
+
+            # 处理可能的 Path 或其他类型
+            if isinstance(image_url, Path):
+                image_url = str(image_url)
+            elif not isinstance(image_url, str):
+                image_url = str(image_url)
+
+            image_url = image_url.strip()
+            if not image_url:
+                return None
+
+            # 支持 file:// 协议和本地路径
+            local_path = None
+            if image_url.startswith("file://"):
+                local_path = image_url[7:]
+            elif image_url.startswith("http://") or image_url.startswith("https://"):
+                local_path = None
+            else:
+                local_path = image_url
+
+            if local_path:
+                if not os.path.exists(local_path):
+                    logger.warning(f"本地图片不存在: {local_path}")
+                    return None
+                with open(local_path, "rb") as f:
+                    img_data = f.read()
+                return PILImage.open(io.BytesIO(img_data))
+
             response = await HTTP_CLIENT.get(image_url)
             if response.status_code != 200:
                 logger.warning(f"图片 {image_url} 下载失败: {response.status_code}")
                 return None
-            
+
             img = PILImage.open(io.BytesIO(response.content))
             return img
         except Exception as e:
